@@ -12,6 +12,10 @@ import (
 	"os"
 )
 
+const (
+	captionLengthLimit = 200
+)
+
 var (
 	telegramApiUrl string = "https://api.telegram.org/bot%s/%s"
 )
@@ -82,36 +86,32 @@ func NewTelegramNotifier(model *m.AlertNotification) (alerting.Notifier, error) 
 }
 
 func (this *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, sendImageInline bool) *m.SendWebhookSync {
-	var imageFile *os.File
-	var err error
-
 	if sendImageInline {
-		imageFile, err = os.Open(evalContext.ImageOnDiskPath)
-		defer imageFile.Close()
-		if err != nil {
-			sendImageInline = false // fall back to text message
+		cmd, err := this.buildInlineMessage(evalContext)
+		if err == nil {
+			return cmd
+		} else {
+			log.Error2("Could not send inline image with Telegram.", "err", err)
 		}
 	}
 
+	return this.buildLinkedMessage(evalContext)
+}
+
+func (this *TelegramNotifier) buildLinkedMessage(evalContext *alerting.EvalContext) *m.SendWebhookSync {
+	var err error
+
 	message := ""
 
-	if sendImageInline {
-		// Telegram's API does not allow HTML formatting for image captions.
-		message = fmt.Sprintf("%s\nState: %s\nMessage: %s\n", evalContext.GetNotificationTitle(), evalContext.Rule.Name, evalContext.Rule.Message)
-	} else {
-		message = fmt.Sprintf("<b>%s</b>\nState: %s\nMessage: %s\n", evalContext.GetNotificationTitle(), evalContext.Rule.Name, evalContext.Rule.Message)
-	}
+	message = fmt.Sprintf("<b>%s</b>\nState: %s\nMessage: %s\n", evalContext.GetNotificationTitle(), evalContext.Rule.Name, evalContext.Rule.Message)
 
 	ruleUrl, err := evalContext.GetRuleUrl()
 	if err == nil {
 		message = message + fmt.Sprintf("URL: %s\n", ruleUrl)
 	}
 
-	if !sendImageInline {
-		// only attach this if we are not sending it inline.
-		if evalContext.ImagePublicUrl != "" {
-			message = message + fmt.Sprintf("Image: %s\n", evalContext.ImagePublicUrl)
-		}
+	if evalContext.ImagePublicUrl != "" {
+		message = message + fmt.Sprintf("Image: %s\n", evalContext.ImagePublicUrl)
 	}
 
 	metrics := ""
@@ -124,12 +124,7 @@ func (this *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, se
 	}
 
 	if metrics != "" {
-		if sendImageInline {
-			// Telegram's API does not allow HTML formatting for image captions.
-			message = message + fmt.Sprintf("\nMetrics:%s", metrics)
-		} else {
-			message = message + fmt.Sprintf("\n<i>Metrics:</i>%s", metrics)
-		}
+		message = message + fmt.Sprintf("\n<i>Metrics:</i>%s", metrics)
 	}
 
 	var body bytes.Buffer
@@ -138,30 +133,16 @@ func (this *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, se
 	fw, _ := w.CreateFormField("chat_id")
 	fw.Write([]byte(this.ChatID))
 
-	if sendImageInline {
-		fw, _ = w.CreateFormField("caption")
-		fw.Write([]byte(message))
+	fw, _ = w.CreateFormField("text")
+	fw.Write([]byte(message))
 
-		fw, _ = w.CreateFormFile("photo", evalContext.ImageOnDiskPath)
-		io.Copy(fw, imageFile)
-	} else {
-		fw, _ = w.CreateFormField("text")
-		fw.Write([]byte(message))
-
-		fw, _ = w.CreateFormField("parse_mode")
-		fw.Write([]byte("html"))
-	}
+	fw, _ = w.CreateFormField("parse_mode")
+	fw.Write([]byte("html"))
 
 	w.Close()
 
-	apiMethod := ""
-	if sendImageInline {
-		this.log.Info("Sending telegram image notification", "photo", evalContext.ImageOnDiskPath, "chat_id", this.ChatID, "bot_token", this.BotToken)
-		apiMethod = "sendPhoto"
-	} else {
-		this.log.Info("Sending telegram text notification", "chat_id", this.ChatID, "bot_token", this.BotToken)
-		apiMethod = "sendMessage"
-	}
+	this.log.Info("Sending telegram text notification", "chat_id", this.ChatID, "bot_token", this.BotToken)
+	apiMethod := "sendMessage"
 
 	url := fmt.Sprintf(telegramApiUrl, this.BotToken, apiMethod)
 	cmd := &m.SendWebhookSync{
@@ -173,6 +154,83 @@ func (this *TelegramNotifier) buildMessage(evalContext *alerting.EvalContext, se
 		},
 	}
 	return cmd
+}
+
+func (this *TelegramNotifier) buildInlineMessage(evalContext *alerting.EvalContext) (*m.SendWebhookSync, error) {
+	var imageFile *os.File
+	var err error
+
+	imageFile, err = os.Open(evalContext.ImageOnDiskPath)
+	defer imageFile.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	ruleUrl, err := evalContext.GetRuleUrl()
+
+	metrics := ""
+	fieldLimitCount := 4
+	for index, evt := range evalContext.EvalMatches {
+		metrics += fmt.Sprintf("\n%s: %s", evt.Metric, evt.Value)
+		if index > fieldLimitCount {
+			break
+		}
+	}
+
+	message := generateImageCaption(evalContext, ruleUrl, metrics)
+
+	var body bytes.Buffer
+
+	w := multipart.NewWriter(&body)
+	fw, _ := w.CreateFormField("chat_id")
+	fw.Write([]byte(this.ChatID))
+
+	fw, _ = w.CreateFormField("caption")
+	fw.Write([]byte(message))
+
+	fw, _ = w.CreateFormFile("photo", evalContext.ImageOnDiskPath)
+	io.Copy(fw, imageFile)
+	w.Close()
+
+	this.log.Info("Sending telegram image notification", "photo", evalContext.ImageOnDiskPath, "chat_id", this.ChatID, "bot_token", this.BotToken)
+	url := fmt.Sprintf(telegramApiUrl, this.BotToken, "sendPhoto")
+	cmd := &m.SendWebhookSync{
+		Url:        url,
+		Body:       body.String(),
+		HttpMethod: "POST",
+		HttpHeader: map[string]string{
+			"Content-Type": w.FormDataContentType(),
+		},
+	}
+	return cmd, nil
+}
+
+func generateImageCaption(evalContext *alerting.EvalContext, ruleUrl string, metrics string) string {
+	message := fmt.Sprintf("%s\nMessage: %s\n", evalContext.GetNotificationTitle(), evalContext.Rule.Message)
+
+	if len(message) > captionLengthLimit {
+		message = message[0:captionLengthLimit]
+
+	}
+
+	if len(ruleUrl) > 0 {
+		urlLine := fmt.Sprintf("URL: %s\n", ruleUrl)
+		message = appendIfPossible(message, urlLine, captionLengthLimit)
+	}
+
+	if metrics != "" {
+		metricsLines := fmt.Sprintf("\nMetrics:%s", metrics)
+		message = appendIfPossible(message, metricsLines, captionLengthLimit)
+	}
+
+	return message
+}
+func appendIfPossible(message string, extra string, sizeLimit int) string {
+	if len(extra)+len(message) <= sizeLimit {
+		return message + extra
+	}
+	log.Debug("Line too long for image caption.", "value", extra)
+	return message
 }
 
 func (this *TelegramNotifier) ShouldNotify(context *alerting.EvalContext) bool {
