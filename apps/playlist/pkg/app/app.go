@@ -18,6 +18,7 @@ import (
 
 type PlaylistConfig struct {
 	EnableReconcilers bool
+	EnableReconcilersV2 bool
 }
 
 func getPatchClient(restConfig rest.Config, playlistKind resource.Kind) (operator.PatchClient, error) {
@@ -32,7 +33,7 @@ func New(cfg app.Config) (app.App, error) {
 	)
 
 	playlistConfig, ok := cfg.SpecificConfig.(*PlaylistConfig)
-	if ok && playlistConfig.EnableReconcilers {
+	if ok && playlistConfig.EnableReconcilers && playlistConfig.EnableReconcilersV2 {
 		patchClient, err := getPatchClient(cfg.KubeConfig, playlistv0alpha1.PlaylistKind())
 		if err != nil {
 			klog.ErrorS(err, "Error getting patch client for use with opinionated reconciler")
