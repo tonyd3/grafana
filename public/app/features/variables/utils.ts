@@ -260,7 +260,7 @@ export function ensureStringValues(value: unknown | unknown[]): string | string[
     return value.toString();
   }
 
-  return String(value);
+  return '';
 }
 
 export function hasOngoingTransaction(key: string, state: StoreState = getState()): boolean {
