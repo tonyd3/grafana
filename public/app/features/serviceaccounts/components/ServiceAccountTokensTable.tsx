@@ -77,9 +77,9 @@ function formatLastUsedAtDate(timeZone: TimeZone, lastUsedAt?: string): string {
 
 function formatDate(timeZone: TimeZone, expiration?: string): string {
   if (!expiration) {
-    return 'No expiration date';
+    return dateTimeFormat(new Date().toISOString(), { timeZone });
   }
-  return dateTimeFormat(expiration, { timeZone });
+  return 'No expiration date';
 }
 
 function formatSecondsLeftUntilExpiration(secondsUntilExpiration: number): string {
